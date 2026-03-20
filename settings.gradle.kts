@@ -1,0 +1,1 @@
+rootProject.name = "JSON_Tree_JQ"

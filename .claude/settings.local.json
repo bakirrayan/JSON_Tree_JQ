@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew build:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:security.humanativaspa.it)",
+      "WebFetch(domain:danaepp.com)",
+      "WebFetch(domain:hnsecurity.it)"
+    ]
+  }
+}
