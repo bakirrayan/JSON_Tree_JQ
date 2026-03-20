@@ -17,25 +17,25 @@ A Burp Suite extension that renders JSON HTTP responses as an interactive, colla
 
 ### Main view
 
-![Main extension view](main_extension.png)
+![Main extension view](assets/main_extension.png)
 
 The JSON response is rendered as a collapsible tree. Keys are highlighted in blue, array/object sizes are shown inline (`{6}`, `[36]`), and absolute line numbers appear in the gutter.
 
 ### jq autocomplete
 
-![jq autocomplete suggestions](JQ_autocomplete_suggestions.png)
+![jq autocomplete suggestions](assets/JQ_autocomplete_suggestions.png)
 
 Typing a path in the filter bar (e.g. `.catalog.`) triggers an autocomplete dropdown listing the matching field names in the current response.
 
 ### jq query results
 
-![jq query](JQ_query.png)
+![jq query](assets/JQ_query.png)
 
 A full jq expression like `.catalog.content[] | {id, nombre}` filters the tree in real time, showing only the projected fields from each array item.
 
 ### Right-click context menu
 
-![Copy value / key context menu](copy_value_key.png)
+![Copy value / key context menu](assets/copy_value_key.png)
 
 Right-clicking any node exposes **Copy value**, **Copy key**, and **Copy key: value** options. `Ctrl+C` copies `key: value` of the selected node directly.
 
