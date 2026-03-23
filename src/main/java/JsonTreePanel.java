@@ -21,6 +21,7 @@ public class JsonTreePanel extends JPanel {
     private final JTree tree;
     private final JqSearchBar searchBar;
     private final JLabel statusLabel = new JLabel(" ");
+    private final JLabel pythonLabel = new JLabel(" ");
     private final JqRunner jqRunner;
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -42,11 +43,16 @@ public class JsonTreePanel extends JPanel {
         tree.setRowHeight(0); // auto-size each row from the renderer's preferred height
         tree.setFont(new Font("Roboto", Font.PLAIN, 17));
 
-        // Status label — shows the jq path of the selected node
+        // Status labels — show the jq and Python paths of the selected node
         tree.addTreeSelectionListener(e -> {
             TreePath path = tree.getSelectionPath();
-            if (path == null) { statusLabel.setText(" "); return; }
+            if (path == null) {
+                statusLabel.setText(" ");
+                pythonLabel.setText(" ");
+                return;
+            }
             statusLabel.setText(buildJqPath(path));
+            pythonLabel.setText(buildPythonPath(path));
         });
 
         // Ctrl+C: copy "key: value" of the selected node
@@ -91,6 +97,7 @@ public class JsonTreePanel extends JPanel {
         collapseAll.addActionListener(e -> collapseAll());
 
         statusLabel.setFont(new Font("Roboto", Font.PLAIN, 11));
+        pythonLabel.setFont(new Font("Roboto", Font.PLAIN, 11));
 
         JPanel bottomBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
         bottomBar.add(expandAll);
@@ -99,6 +106,10 @@ public class JsonTreePanel extends JPanel {
             setPreferredSize(new Dimension(1, 16));
         }});
         bottomBar.add(statusLabel);
+        bottomBar.add(new JSeparator(SwingConstants.VERTICAL) {{
+            setPreferredSize(new Dimension(1, 16));
+        }});
+        bottomBar.add(pythonLabel);
 
         add(searchBar, BorderLayout.NORTH);
         add(scrollPane, BorderLayout.CENTER);
@@ -367,5 +378,21 @@ public class JsonTreePanel extends JPanel {
             }
         }
         return sb.length() == 0 ? "." : sb.toString();
+    }
+
+    private String buildPythonPath(TreePath path) {
+        StringBuilder sb = new StringBuilder("response.json()");
+        Object[] components = path.getPath();
+        for (int i = 1; i < components.length; i++) {
+            if (components[i] instanceof JsonTreeNode node) {
+                String key = node.getKey();
+                if (key != null && key.startsWith("[") && key.endsWith("]")) {
+                    sb.append(key); // array index: [0]
+                } else if (key != null) {
+                    sb.append("['").append(key).append("']"); // object key: ['name']
+                }
+            }
+        }
+        return sb.toString();
     }
 }
