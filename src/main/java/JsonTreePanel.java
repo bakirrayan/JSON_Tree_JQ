@@ -255,18 +255,26 @@ public class JsonTreePanel extends JPanel {
 
     // ── Copy helpers ──────────────────────────────────────────────────────────
 
-    private enum CopyMode { KEY, VALUE, KEY_VALUE }
+    private enum CopyMode { KEY, VALUE, KEY_VALUE, JQ_PATH, PYTHON_PATH }
 
     private void copySelected(CopyMode mode) {
         TreePath path = tree.getSelectionPath();
         if (path == null) return;
-        Object last = path.getLastPathComponent();
-        if (!(last instanceof JsonTreeNode node)) return;
-        String text = switch (mode) {
-            case KEY       -> node.getKey() != null ? node.getKey() : "";
-            case VALUE     -> node.getValue();
-            case KEY_VALUE -> (node.getKey() != null ? node.getKey() + ": " : "") + node.getValue();
-        };
+        String text;
+        if (mode == CopyMode.JQ_PATH) {
+            text = buildJqPath(path);
+        } else if (mode == CopyMode.PYTHON_PATH) {
+            text = buildPythonPath(path);
+        } else {
+            Object last = path.getLastPathComponent();
+            if (!(last instanceof JsonTreeNode node)) return;
+            text = switch (mode) {
+                case KEY       -> node.getKey() != null ? node.getKey() : "";
+                case VALUE     -> node.getValue();
+                case KEY_VALUE -> (node.getKey() != null ? node.getKey() + ": " : "") + node.getValue();
+                default        -> "";
+            };
+        }
         Toolkit.getDefaultToolkit().getSystemClipboard()
                 .setContents(new StringSelection(text), null);
     }
@@ -285,6 +293,16 @@ public class JsonTreePanel extends JPanel {
         JMenuItem copyBoth = new JMenuItem("Copy key: value");
         copyBoth.addActionListener(a -> copySelected(CopyMode.KEY_VALUE));
         menu.add(copyBoth);
+
+        menu.addSeparator();
+
+        JMenuItem copyJqPath = new JMenuItem("Copy jq path");
+        copyJqPath.addActionListener(a -> copySelected(CopyMode.JQ_PATH));
+        menu.add(copyJqPath);
+
+        JMenuItem copyPythonPath = new JMenuItem("Copy Python path");
+        copyPythonPath.addActionListener(a -> copySelected(CopyMode.PYTHON_PATH));
+        menu.add(copyPythonPath);
 
         menu.show(tree, e.getX(), e.getY());
     }
