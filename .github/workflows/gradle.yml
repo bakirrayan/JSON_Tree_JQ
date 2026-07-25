@@ -2,7 +2,8 @@ name: Java CI with Gradle
 
 on:
   push:
-    tags: [ "*" ]
+    # Semver tags only — a stray tag must not cut a release
+    tags: [ "[0-9]+.[0-9]+.[0-9]+" ]
   pull_request:
     branches: [ "main" ]
 
@@ -51,8 +52,11 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         files: JSON_Tree_JQ.jar
+        generate_release_notes: true
 
   dependency-submission:
+    # Needs contents:write, which fork pull requests don't get
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
