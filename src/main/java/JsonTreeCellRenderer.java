@@ -4,8 +4,8 @@ import java.awt.*;
 
 public class JsonTreeCellRenderer implements TreeCellRenderer {
 
-    private static final Font MONO      = new Font("Roboto", Font.PLAIN, 13);
-    private static final Font MONO_BOLD = new Font("Roboto", Font.BOLD,  13);
+    /** Values longer than this are truncated for display only — copy actions use the full text. */
+    private static final int MAX_DISPLAY_CHARS = 300;
 
     private final CellPanel panel = new CellPanel();
 
@@ -34,10 +34,6 @@ public class JsonTreeCellRenderer implements TreeCellRenderer {
             setOpaque(true);
             setBorder(BorderFactory.createEmptyBorder(3, 4, 3, 8));
 
-            keyLabel.setFont(MONO_BOLD);
-            colonLabel.setFont(MONO);
-            valLabel.setFont(MONO);
-
             add(keyLabel);
             add(colonLabel);
             add(valLabel);
@@ -45,6 +41,12 @@ public class JsonTreeCellRenderer implements TreeCellRenderer {
 
         void configure(Object value, boolean selected) {
             boolean dark = isDark();
+
+            // Fonts are re-read here (not cached) so a Burp theme or font-size change applies live
+            Font mono = JsonFonts.mono();
+            keyLabel.setFont(mono.deriveFont(Font.BOLD));
+            colonLabel.setFont(mono);
+            valLabel.setFont(mono);
 
             // ── Backgrounds ─────────────────────────────────────────────────
             Color treeBg = UIManager.getColor("Tree.background");
@@ -85,7 +87,7 @@ public class JsonTreeCellRenderer implements TreeCellRenderer {
             keyLabel.setVisible(hasKey);
             colonLabel.setVisible(hasKey);
             if (hasKey) {
-                keyLabel.setText(key);
+                keyLabel.setText(JsonPaths.displayValue(key, MAX_DISPLAY_CHARS));
                 keyLabel.setForeground(selected ? onSel : keyColor);
             }
             colonLabel.setForeground(selected ? onSelDim : colonColor);
@@ -99,10 +101,10 @@ public class JsonTreeCellRenderer implements TreeCellRenderer {
                 default      -> bracketColor;
             };
             String display = switch (kind) {
-                case STRING -> "\"" + val + "\"";
+                case STRING -> "\"" + JsonPaths.displayValue(val, MAX_DISPLAY_CHARS) + "\"";
                 case OBJECT -> "{" + node.getChildCount() + "}";
                 case ARRAY  -> "[" + node.getChildCount() + "]";
-                default     -> val;
+                default     -> JsonPaths.displayValue(val, MAX_DISPLAY_CHARS);
             };
             valLabel.setText(display);
             valLabel.setForeground(selected ? onSelDim : valueColor);

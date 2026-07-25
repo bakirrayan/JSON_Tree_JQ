@@ -12,12 +12,24 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import javax.swing.*;
 import javax.swing.tree.DefaultTreeModel;
 import java.awt.*;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.Set;
+import java.util.WeakHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class JsonTreeTab implements HttpResponseEditorProvider {
 
+    private static final Pattern CHARSET = Pattern.compile("charset\\s*=\\s*([^;\\s]+)", Pattern.CASE_INSENSITIVE);
+
     private final MontoyaApi api;
     private final JqRunner jqRunner;
+
+    // Weakly held so Burp can garbage-collect editors it has closed; used only for unload cleanup
+    private final Set<Editor> editors = Collections.synchronizedSet(
+            Collections.newSetFromMap(new WeakHashMap<>()));
 
     public JsonTreeTab(MontoyaApi api) {
         this.api = api;
@@ -33,7 +45,18 @@ public class JsonTreeTab implements HttpResponseEditorProvider {
 
     @Override
     public ExtensionProvidedHttpResponseEditor provideHttpResponseEditor(EditorCreationContext context) {
-        return new Editor(api, jqRunner);
+        Editor editor = new Editor(api, jqRunner);
+        editors.add(editor);
+        return editor;
+    }
+
+    /** Releases every editor's background work and UI resources when the extension unloads. */
+    public void unload() {
+        synchronized (editors) {
+            for (Editor editor : editors) editor.dispose();
+            editors.clear();
+        }
+        api.logging().logToOutput("JSON Tree Viewer unloaded.");
     }
 
     private static class Editor implements ExtensionProvidedHttpResponseEditor {
@@ -63,36 +86,74 @@ public class JsonTreeTab implements HttpResponseEditorProvider {
             this.currentResponse = response;
 
             // Cancel any in-flight worker
-            if (currentWorker != null && !currentWorker.isDone()) {
-                currentWorker.cancel(true);
+            cancelWorker();
+
+            if (response == null) {
+                panel.showEmpty("No response");
+                return;
             }
 
             ByteArray body = response.body();
-            String bodyStr = new String(body.getBytes(), StandardCharsets.UTF_8);
+            if (body == null || body.length() == 0) {
+                panel.showEmpty("Empty response body");
+                return;
+            }
+
+            String bodyStr = new String(body.getBytes(), charsetOf(response));
 
             SwingWorker<DefaultTreeModel, Void> worker = new SwingWorker<>() {
-                String rawJson;
+                JsonNode parsed;
 
                 @Override
                 protected DefaultTreeModel doInBackground() throws Exception {
-                    rawJson = bodyStr;
-                    JsonNode node = mapper.readTree(bodyStr);
-                    return JsonTreeModel.build(node);
+                    parsed = mapper.readTree(bodyStr);
+                    // readTree returns a MissingNode (rather than throwing) for blank input
+                    if (parsed == null || parsed.isMissingNode()) {
+                        throw new IllegalArgumentException("no JSON content");
+                    }
+                    return JsonTreeModel.build(parsed);
                 }
 
                 @Override
                 protected void done() {
                     if (isCancelled()) return;
                     try {
-                        panel.setModel(get(), rawJson);
+                        panel.setModel(get(), parsed);
                     } catch (Exception e) {
                         api.logging().logToError("JSON parse error: " + e.getMessage());
-                        panel.setModel(new DefaultTreeModel(null), null);
+                        panel.showEmpty("Response body is not valid JSON");
                     }
                 }
             };
             currentWorker = worker;
             worker.execute();
+        }
+
+        /** Honours the charset declared on Content-Type; falls back to UTF-8. */
+        private Charset charsetOf(HttpResponse response) {
+            String contentType = response.headerValue("Content-Type");
+            if (contentType != null) {
+                Matcher m = CHARSET.matcher(contentType);
+                if (m.find()) {
+                    try {
+                        return Charset.forName(m.group(1).replace("\"", "").trim());
+                    } catch (Exception ignored) {
+                        // unknown or malformed charset — fall through to UTF-8
+                    }
+                }
+            }
+            return StandardCharsets.UTF_8;
+        }
+
+        void cancelWorker() {
+            if (currentWorker != null && !currentWorker.isDone()) {
+                currentWorker.cancel(true);
+            }
+        }
+
+        void dispose() {
+            cancelWorker();
+            panel.dispose();
         }
 
         @Override

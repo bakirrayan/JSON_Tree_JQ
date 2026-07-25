@@ -1,5 +1,4 @@
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -23,10 +22,10 @@ public class JsonTreePanel extends JPanel {
     private final JLabel statusLabel = new JLabel(" ");
     private final JLabel pythonLabel = new JLabel(" ");
     private final JqRunner jqRunner;
-    private final ObjectMapper mapper = new ObjectMapper();
 
-    // originalJson is set ONLY when a new HTTP response arrives — never overwritten by queries
-    private String originalJson;
+    // The parsed response body. Set ONLY when a new HTTP response arrives — never overwritten by
+    // queries — and reused by both jq and autocomplete so the body is never re-parsed.
+    private JsonNode originalRoot;
 
     // Maps every tree node → its absolute pre-order index across the full (unexpanded) tree.
     // Used by LineNumberView so collapsed nodes still show their real position.
@@ -41,7 +40,7 @@ public class JsonTreePanel extends JPanel {
         tree.setRootVisible(false);
         tree.setShowsRootHandles(true);
         tree.setRowHeight(0); // auto-size each row from the renderer's preferred height
-        tree.setFont(new Font("Roboto", Font.PLAIN, 17));
+        tree.setFont(JsonFonts.ui());
 
         // Status labels — show the jq and Python paths of the selected node
         tree.addTreeSelectionListener(e -> {
@@ -89,15 +88,15 @@ public class JsonTreePanel extends JPanel {
         JButton expandAll   = new JButton("Expand All");
         JButton collapseAll = new JButton("Collapse All");
         for (JButton btn : new JButton[]{expandAll, collapseAll}) {
-            btn.setFont(btn.getFont().deriveFont(Font.PLAIN, 11f));
+            btn.setFont(JsonFonts.small());
             btn.setFocusPainted(false);
             btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         }
         expandAll.addActionListener(e -> expandAll());
         collapseAll.addActionListener(e -> collapseAll());
 
-        statusLabel.setFont(new Font("Roboto", Font.PLAIN, 11));
-        pythonLabel.setFont(new Font("Roboto", Font.PLAIN, 11));
+        statusLabel.setFont(JsonFonts.small());
+        pythonLabel.setFont(JsonFonts.small());
 
         JPanel bottomBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
         bottomBar.add(expandAll);
@@ -118,21 +117,32 @@ public class JsonTreePanel extends JPanel {
 
     // ── Public API ────────────────────────────────────────────────────────────
 
-    /** Called when a new HTTP response arrives. This is the ONLY place originalJson is written. */
-    public void setModel(DefaultTreeModel model, String originalJson) {
-        this.originalJson = originalJson;
+    /** Called when a new HTTP response arrives. This is the ONLY place originalRoot is written. */
+    public void setModel(DefaultTreeModel model, JsonNode originalRoot) {
+        this.originalRoot = originalRoot;
         applyModelToTree(model);
     }
 
-    /** Rebuilds the tree from a JSON string. Does NOT touch originalJson. */
-    public void rebuildTree(String json) {
-        try {
-            JsonNode node = mapper.readTree(json);
-            DefaultTreeModel model = JsonTreeModel.build(node);
-            applyModelToTree(model);
-        } catch (Exception ex) {
-            searchBar.showError(ex.getMessage());
-        }
+    /** Clears the tree and reports why (e.g. the body isn't JSON). */
+    public void showEmpty(String reason) {
+        this.originalRoot = null;
+        SwingUtilities.invokeLater(() -> {
+            tree.setModel(new DefaultTreeModel(null));
+            nodeAbsIndex.clear();
+            statusLabel.setText(" ");
+            pythonLabel.setText(" ");
+            searchBar.showError(reason);
+        });
+    }
+
+    /** Releases UI resources — called when the extension unloads. */
+    public void dispose() {
+        searchBar.dispose();
+    }
+
+    /** Rebuilds the tree from an already-parsed node. Does NOT touch originalRoot. */
+    public void rebuildTree(JsonNode node) {
+        applyModelToTree(JsonTreeModel.build(node));
     }
 
     // ── Tree display ──────────────────────────────────────────────────────────
@@ -141,14 +151,23 @@ public class JsonTreePanel extends JPanel {
         SwingUtilities.invokeLater(() -> {
             tree.setModel(model);
             rebuildNodeIndex();          // must happen after setModel
-            // Auto-expand depth 1 only
-            for (int i = 0; i < tree.getRowCount(); i++) tree.expandRow(i);
-            for (int i = tree.getRowCount() - 1; i > 0; i--) {
-                TreePath path = tree.getPathForRow(i);
-                if (path != null && path.getPathCount() > 2) tree.collapseRow(i);
-            }
+            expandTopLevel(model);
             searchBar.clearError();
         });
+    }
+
+    /**
+     * Expands only the hidden root's direct children. Expanding every row and collapsing back
+     * down to depth 1 would walk the whole document on the EDT — seconds of freeze on a big body.
+     */
+    private void expandTopLevel(DefaultTreeModel model) {
+        Object root = model.getRoot();
+        if (root == null) return;
+        tree.expandPath(new TreePath(root));
+        int childCount = model.getChildCount(root);
+        for (int i = 0; i < childCount; i++) {
+            tree.expandPath(new TreePath(new Object[]{root, model.getChild(root, i)}));
+        }
     }
 
     // ── Absolute node index (for line numbers) ────────────────────────────────
@@ -178,8 +197,15 @@ public class JsonTreePanel extends JPanel {
 
     // ── jq query ──────────────────────────────────────────────────────────────
 
+    /** Max entries in the autocomplete popup — an object with thousands of keys is unusable. */
+    private static final int MAX_SUGGESTIONS = 50;
+
+    /**
+     * Runs on the EDT for every keystroke, so it walks the cached {@link #originalRoot} directly
+     * instead of invoking jq — which would re-parse and re-compile the whole document each time.
+     */
     private List<String> getSuggestions(String partialQuery) {
-        if (originalJson == null || jqRunner == null) return List.of();
+        if (originalRoot == null) return List.of();
 
         int lastDot = partialQuery.lastIndexOf('.');
         if (lastDot < 0) return List.of();
@@ -189,52 +215,59 @@ public class JsonTreePanel extends JPanel {
 
         if (filter.contains("[") || filter.contains("|") || filter.contains(" ")) return List.of();
 
-        try {
-            JsonNode result;
-            if (pathPrefix.isEmpty()) {
-                result = mapper.readTree(originalJson);
-            } else {
-                result = mapper.readTree(jqRunner.run(originalJson, pathPrefix));
-            }
+        JsonNode result = resolvePath(pathPrefix);
+        if (result == null) return List.of();
 
-            List<String> keys = new ArrayList<>();
-            if (result.isObject()) {
-                result.fieldNames().forEachRemaining(k -> {
-                    if (filter.isEmpty() || k.startsWith(filter)) keys.add(k);
-                });
-            } else if (result.isArray() && result.size() > 0) {
-                JsonNode first = result.get(0);
-                if (first != null && first.isObject()) {
-                    first.fieldNames().forEachRemaining(k -> {
-                        if (filter.isEmpty() || k.startsWith(filter)) keys.add(k);
-                    });
-                }
-            }
-            return keys;
-        } catch (Exception e) {
-            return List.of();
+        // For arrays, suggest the keys of the first element — that's what .foo[] usually yields
+        if (result.isArray() && result.size() > 0) result = result.get(0);
+        if (result == null || !result.isObject()) return List.of();
+
+        List<String> keys = new ArrayList<>();
+        var names = result.fieldNames();
+        while (names.hasNext() && keys.size() < MAX_SUGGESTIONS) {
+            String k = names.next();
+            if (filter.isEmpty() || k.startsWith(filter)) keys.add(k);
         }
+        return keys;
+    }
+
+    /**
+     * Resolves a simple dotted prefix such as {@code .user.address} against the cached document.
+     * Returns null for anything more complex than plain field access — no suggestions is better
+     * than blocking the EDT on jq.
+     */
+    private JsonNode resolvePath(String pathPrefix) {
+        JsonNode node = originalRoot;
+        if (pathPrefix.isEmpty() || pathPrefix.equals(".")) return node;
+        for (String segment : pathPrefix.split("\\.", -1)) {
+            if (segment.isEmpty()) continue;
+            if (node == null || !node.isObject()) return null;
+            node = node.get(segment);
+        }
+        return node;
     }
 
     private void runQuery() {
         String query = searchBar.getQuery();
         searchBar.clearError();
 
-        if (originalJson == null) return;
+        if (originalRoot == null) return;
         if (jqRunner == null) { searchBar.showError("jq engine failed to initialize"); return; }
 
         if (query.isEmpty() || query.equals(".")) {
-            rebuildTree(originalJson);
+            rebuildTree(originalRoot);
             return;
         }
 
-        SwingWorker<String, Void> worker = new SwingWorker<>() {
-            @Override protected String doInBackground() throws Exception {
-                return jqRunner.run(originalJson, query);
+        JsonNode input = originalRoot;
+        SwingWorker<DefaultTreeModel, Void> worker = new SwingWorker<>() {
+            // Both the jq run and the tree build stay off the EDT
+            @Override protected DefaultTreeModel doInBackground() throws Exception {
+                return JsonTreeModel.build(jqRunner.runToNode(input, query));
             }
             @Override protected void done() {
                 try {
-                    rebuildTree(get());
+                    applyModelToTree(get());
                 } catch (Exception ex) {
                     searchBar.showError(ex.getCause() != null ? ex.getCause().getMessage() : ex.getMessage());
                 }
@@ -312,7 +345,7 @@ public class JsonTreePanel extends JPanel {
     private class LineNumberView extends JComponent {
 
         LineNumberView() {
-            setFont(new Font("Roboto", Font.PLAIN, 11));
+            setFont(JsonFonts.small());
             setOpaque(true);
 
             TreeExpansionListener rel = new TreeExpansionListener() {
@@ -326,7 +359,7 @@ public class JsonTreePanel extends JPanel {
         /** Dynamic width — grows as the total node count gains digits. */
         private int rulerWidth() {
             int maxNum = nodeAbsIndex.isEmpty() ? 9 : nodeAbsIndex.size();
-            FontMetrics fm = getFontMetrics(getFont());
+            FontMetrics fm = getFontMetrics(JsonFonts.small());
             return fm.stringWidth("9".repeat(String.valueOf(maxNum).length())) + 14;
         }
 
@@ -337,15 +370,15 @@ public class JsonTreePanel extends JPanel {
 
         @Override
         protected void paintComponent(Graphics g) {
-            // Theme-aware colours
+            // Theme-aware colours, painted directly — mutating component state (setBackground /
+            // setForeground) inside paint can re-trigger repaints.
             boolean dark = JsonTreeCellRenderer.isDark();
             Color bg  = dark ? new Color(0x2D, 0x2D, 0x2D) : new Color(0xF5, 0xF5, 0xF5);
             Color fg  = dark ? new Color(0x66, 0x66, 0x66) : new Color(0x99, 0x99, 0x99);
             Color div = dark ? new Color(0x44, 0x44, 0x44) : new Color(0xCC, 0xCC, 0xCC);
 
-            setBackground(bg);
-            setForeground(fg);
-            super.paintComponent(g);
+            g.setColor(bg);
+            g.fillRect(0, 0, getWidth(), getHeight());
 
             // Right-side divider line
             g.setColor(div);
@@ -353,12 +386,13 @@ public class JsonTreePanel extends JPanel {
 
             Graphics2D g2 = (Graphics2D) g;
             g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-            g2.setFont(getFont());
+            g2.setFont(JsonFonts.small());
             g2.setColor(fg);
             FontMetrics fm = g2.getFontMetrics();
 
             int w = getWidth() - 6; // right-align within ruler (leave 6px right margin)
             Rectangle clip = g.getClipBounds();
+            if (clip == null) clip = new Rectangle(0, 0, getWidth(), getHeight());
             int rowCount = tree.getRowCount();
 
             for (int i = 0; i < rowCount; i++) {
@@ -383,34 +417,10 @@ public class JsonTreePanel extends JPanel {
     // ── jq path builder ───────────────────────────────────────────────────────
 
     private String buildJqPath(TreePath path) {
-        StringBuilder sb = new StringBuilder();
-        Object[] components = path.getPath();
-        for (int i = 1; i < components.length; i++) {
-            if (components[i] instanceof JsonTreeNode node) {
-                String key = node.getKey();
-                if (key != null && key.startsWith("[") && key.endsWith("]")) {
-                    sb.append(key);
-                } else if (key != null) {
-                    sb.append(".").append(key);
-                }
-            }
-        }
-        return sb.length() == 0 ? "." : sb.toString();
+        return JsonPaths.jq(path.getPath());
     }
 
     private String buildPythonPath(TreePath path) {
-        StringBuilder sb = new StringBuilder("response.json()");
-        Object[] components = path.getPath();
-        for (int i = 1; i < components.length; i++) {
-            if (components[i] instanceof JsonTreeNode node) {
-                String key = node.getKey();
-                if (key != null && key.startsWith("[") && key.endsWith("]")) {
-                    sb.append(key); // array index: [0]
-                } else if (key != null) {
-                    sb.append("['").append(key).append("']"); // object key: ['name']
-                }
-            }
-        }
-        return sb.toString();
+        return JsonPaths.python(path.getPath());
     }
 }

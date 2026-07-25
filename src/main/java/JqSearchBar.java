@@ -12,12 +12,13 @@ public class JqSearchBar extends JPanel {
     private static final int   DEBOUNCE_MS = 400;
     private static final Color ERROR_COLOR = new Color(0xD9, 0x53, 0x4F);
     private static final Color HINT_COLOR  = new Color(0x99, 0x99, 0x99);
-    private static final Font  MONO        = new Font("Roboto", Font.PLAIN, 13);
 
     private final JTextField   queryField;
     private final JLabel       errorLabel = new JLabel(" ");
     private final ActionListener onRun;
     private final Timer        debounceTimer;
+    /** Delays hiding the popup on focus loss so a mouse click on the list registers first. */
+    private final Timer        hideTimer;
 
     // Suggestion popup
     private JWindow                      popupWindow;
@@ -38,19 +39,19 @@ public class JqSearchBar extends JPanel {
                 if (getText().isEmpty() && !isFocusOwner()) {
                     Graphics2D g2 = (Graphics2D) g.create();
                     g2.setColor(HINT_COLOR);
-                    g2.setFont(MONO.deriveFont(Font.ITALIC));
+                    g2.setFont(JsonFonts.mono().deriveFont(Font.ITALIC));
                     Insets ins = getInsets();
                     g2.drawString("jq filter  (e.g. .user.name)", ins.left + 2, getHeight() - ins.bottom - 4);
                     g2.dispose();
                 }
             }
         };
-        queryField.setFont(MONO);
+        queryField.setFont(JsonFonts.mono());
         queryField.setBorder(new CompoundBorder(
                 BorderFactory.createLineBorder(new Color(0x99, 0x99, 0x99)),
                 BorderFactory.createEmptyBorder(3, 6, 3, 6)));
 
-        errorLabel.setFont(MONO.deriveFont(Font.PLAIN, 11f));
+        errorLabel.setFont(JsonFonts.small());
         errorLabel.setForeground(ERROR_COLOR);
 
         JPanel inputRow = new JPanel(new BorderLayout(6, 0));
@@ -63,6 +64,9 @@ public class JqSearchBar extends JPanel {
         debounceTimer = new Timer(DEBOUNCE_MS,
                 e -> onRun.actionPerformed(new ActionEvent(queryField, ActionEvent.ACTION_PERFORMED, "debounce")));
         debounceTimer.setRepeats(false);
+
+        hideTimer = new Timer(150, e -> hideSuggestions());
+        hideTimer.setRepeats(false);
 
         // Live typing → restart debounce + refresh suggestions
         queryField.getDocument().addDocumentListener(new DocumentListener() {
@@ -111,15 +115,13 @@ public class JqSearchBar extends JPanel {
             @Override public void focusGained(FocusEvent e) { queryField.repaint(); }
             @Override public void focusLost(FocusEvent e) {
                 queryField.repaint();
-                Timer t = new Timer(150, ev -> hideSuggestions());
-                t.setRepeats(false);
-                t.start();
+                hideTimer.restart();
             }
         });
 
         // Suggestion list styling
-        suggestionList.setFont(MONO);
-        suggestionList.setFixedCellHeight(22);
+        suggestionList.setFont(JsonFonts.mono());
+        suggestionList.setFixedCellHeight(cellHeight());
         suggestionList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         suggestionList.setBorder(BorderFactory.createEmptyBorder(2, 4, 2, 4));
         suggestionList.addMouseListener(new MouseAdapter() {
@@ -159,10 +161,15 @@ public class JqSearchBar extends JPanel {
         try {
             Point loc = queryField.getLocationOnScreen();
             int rows = Math.min(listModel.size(), 6);
+            int rowHeight = suggestionList.getFixedCellHeight();
             popupWindow.setBounds(loc.x, loc.y + queryField.getHeight(),
-                    queryField.getWidth(), rows * 22 + 4);
+                    queryField.getWidth(), rows * rowHeight + 4);
             popupWindow.setVisible(true);
         } catch (IllegalComponentStateException ignored) {}
+    }
+
+    private int cellHeight() {
+        return Math.max(18, getFontMetrics(JsonFonts.mono()).getHeight() + 6);
     }
 
     private void hideSuggestions() {
@@ -183,6 +190,22 @@ public class JqSearchBar extends JPanel {
 
     public void setSuggestionProvider(Function<String, List<String>> provider) {
         this.suggestionProvider = provider;
+    }
+
+    /** Stops timers and destroys the popup window so nothing survives an extension unload. */
+    public void dispose() {
+        debounceTimer.stop();
+        hideTimer.stop();
+        if (popupWindow != null) {
+            popupWindow.dispose();
+            popupWindow = null; // recreated lazily if the bar is shown again
+        }
+    }
+
+    @Override
+    public void removeNotify() {
+        dispose();
+        super.removeNotify();
     }
 
     public String getQuery() { return queryField.getText().trim(); }
